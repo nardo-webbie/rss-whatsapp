@@ -1,0 +1,33 @@
+name: RSS Feed Checker
+
+on:
+  schedule:
+    # Elk uur op het hele uur (UTC)
+    # Nederland: UTC+1 (winter) of UTC+2 (zomer)
+    - cron: "0 * * * *"
+
+  # Handmatig triggeren via GitHub → Actions → Run workflow
+  workflow_dispatch:
+
+jobs:
+  check-rss:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check RSS feeds en stuur WhatsApp bij updates
+        run: |
+          RESPONSE=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X GET "${{ secrets.VERCEL_APP_URL }}/api/check-rss" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+
+          echo "HTTP status: $RESPONSE"
+          echo "Response:"
+          cat /tmp/response.json
+
+          if [ "$RESPONSE" != "200" ]; then
+            echo "❌ Endpoint gaf status $RESPONSE terug"
+            exit 1
+          fi
+
+          echo "✅ Klaar"
