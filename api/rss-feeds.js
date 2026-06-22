@@ -9,7 +9,16 @@ export const RSS_FEEDS = [
     url: "https://www.douane.nl/nieuws/nieuwsberichten/feed/",
     emoji: "🛃",
   },
-
+ {
+    name: "Douane NL – Storing",
+    url: "https://nh.douane.nl/status-berichten/feed/",
+    emoji: "🛃",
+  },
+{
+    name: "Douane NL – Nieuwsberichten",
+    url: "https://nh.douane.nl/category/serviceberichten/feed/",
+    emoji: "🛃",
+},
   // Meer feeds toevoegen? Kopieer het blok hieronder en pas aan:
   // {
   //   name: "Belastingdienst Nieuws",
