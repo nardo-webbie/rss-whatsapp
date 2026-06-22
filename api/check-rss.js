@@ -71,7 +71,7 @@ export default async function handler(req, res) {
     // ── Dynamic imports — fouten hier worden nu WEL opgevangen ──────────
     const { default: Parser } = await import("rss-parser");
     const { default: twilio } = await import("twilio");
-    const { RSS_FEEDS } = await import("../config/rss-feeds.js");
+    const { RSS_FEEDS } = await import("./rss-feeds.js");
 
     const parser = new Parser({
       timeout: 10000,
