@@ -1,7 +1,7 @@
 /**
  * api/check-rss.js
  *
- * Vercel Cron Function — draait elk uur.
+ * Wordt aangeroepen door GitHub Actions (zie .github/workflows/rss-check.yml)
  * Checkt alle feeds in config/rss-feeds.js op nieuwe items.
  * Stuurt bij een nieuw item een WhatsApp bericht via Twilio Sandbox.
  *
@@ -14,56 +14,6 @@
  *   JSONBIN_BIN_ID
  *   CRON_SECRET            (willekeurige string, zelf kiezen)
  */
-
-import Parser from "rss-parser";
-import twilio from "twilio";
-import { RSS_FEEDS } from "../config/rss-feeds.js";
-
-const parser = new Parser({
-  timeout: 10000,
-  headers: { "User-Agent": "Mozilla/5.0 RSS-Checker/1.0" },
-});
-
-// ── JSONBin helpers ──────────────────────────────────────────────────────────
-
-async function getState() {
-  const res = await fetch(
-    `https://api.jsonbin.io/v3/b/${process.env.JSONBIN_BIN_ID}/latest`,
-    { headers: { "X-Master-Key": process.env.JSONBIN_API_KEY } }
-  );
-  if (!res.ok) throw new Error(`JSONBin GET mislukt: ${res.status}`);
-  const data = await res.json();
-  return data.record || {};
-}
-
-async function saveState(state) {
-  const res = await fetch(
-    `https://api.jsonbin.io/v3/b/${process.env.JSONBIN_BIN_ID}`,
-    {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Master-Key": process.env.JSONBIN_API_KEY,
-      },
-      body: JSON.stringify(state),
-    }
-  );
-  if (!res.ok) throw new Error(`JSONBin PUT mislukt: ${res.status}`);
-}
-
-// ── Twilio WhatsApp helper ───────────────────────────────────────────────────
-
-async function sendWhatsApp(body) {
-  const client = twilio(
-    process.env.TWILIO_ACCOUNT_SID,
-    process.env.TWILIO_AUTH_TOKEN
-  );
-  return client.messages.create({
-    from: process.env.TWILIO_WHATSAPP_FROM,
-    to: process.env.TWILIO_WHATSAPP_TO,
-    body,
-  });
-}
 
 function buildMessage(feed, item) {
   const pubDate = item.pubDate
@@ -91,85 +41,149 @@ function buildMessage(feed, item) {
     .join("\n");
 }
 
-// ── Main handler ─────────────────────────────────────────────────────────────
-
 export default async function handler(req, res) {
-  // Vercel stuurt automatisch CRON_SECRET als Bearer token bij cron-aanroepen.
-  // Bij handmatig testen: stuur Authorization: Bearer <CRON_SECRET> mee.
-  const authHeader = req.headers["authorization"];
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  const log = [];
-  let state;
-
+  // ── ALLES in één grote try/catch, inclusief imports ──────────────────────
+  // Zo komt elke fout terug als nette JSON i.p.v. Vercel's generieke crash page.
   try {
-    state = await getState();
-  } catch (err) {
-    return res.status(500).json({ error: "JSONBin laden mislukt", detail: err.message });
-  }
-
-  const newState = { ...state };
-  const sent = [];
-  const errors = [];
-
-  for (const feed of RSS_FEEDS) {
-    try {
-      const parsed = await parser.parseURL(feed.url);
-
-      if (!parsed.items || parsed.items.length === 0) {
-        log.push(`${feed.name}: geen items gevonden`);
-        continue;
-      }
-
-      // Neem de nieuwste N items (max 3) zodat we ook meerdere updates
-      // in één check-ronde verwerken als ze er tegelijkertijd zijn.
-      const latestItems = parsed.items.slice(0, 3);
-      const lastSeenId = state[feed.url];
-
-      // Bepaal welke items nieuw zijn (nog niet gezien)
-      const newItems = [];
-      for (const item of latestItems) {
-        const itemId = item.guid || item.id || item.link || item.title;
-        if (itemId === lastSeenId) break; // rest hebben we al gehad
-        newItems.push({ item, itemId });
-      }
-
-      if (newItems.length === 0) {
-        log.push(`${feed.name}: geen nieuw item`);
-        continue;
-      }
-
-      // Stuur berichten voor elk nieuw item (oudste eerst)
-      for (const { item, itemId } of newItems.reverse()) {
-        const message = buildMessage(feed, item);
-        await sendWhatsApp(message);
-        sent.push({ feed: feed.name, title: item.title });
-        log.push(`${feed.name}: bericht gestuurd — "${item.title}"`);
-      }
-
-      // Sla het meest recente item op
-      newState[feed.url] = newItems[0].itemId;
-
-    } catch (err) {
-      const msg = `${feed.name}: FOUT — ${err.message}`;
-      errors.push(msg);
-      log.push(msg);
+    // ── Auth check ───────────────────────────────────────────────────────
+    const authHeader = req.headers["authorization"];
+    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+      return res.status(401).json({ error: "Unauthorized" });
     }
-  }
 
-  try {
-    await saveState(newState);
+    // ── Check verplichte env vars vóórdat we iets doen ──────────────────
+    const requiredEnvVars = [
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_AUTH_TOKEN",
+      "TWILIO_WHATSAPP_FROM",
+      "TWILIO_WHATSAPP_TO",
+      "JSONBIN_API_KEY",
+      "JSONBIN_BIN_ID",
+    ];
+    const missing = requiredEnvVars.filter((key) => !process.env[key]);
+    if (missing.length > 0) {
+      return res.status(500).json({
+        error: "Environment variables ontbreken in Vercel",
+        missing,
+      });
+    }
+
+    // ── Dynamic imports — fouten hier worden nu WEL opgevangen ──────────
+    const { default: Parser } = await import("rss-parser");
+    const { default: twilio } = await import("twilio");
+    const { RSS_FEEDS } = await import("../config/rss-feeds.js");
+
+    const parser = new Parser({
+      timeout: 10000,
+      headers: { "User-Agent": "Mozilla/5.0 RSS-Checker/1.0" },
+    });
+
+    const twilioClient = twilio(
+      process.env.TWILIO_ACCOUNT_SID,
+      process.env.TWILIO_AUTH_TOKEN
+    );
+
+    async function sendWhatsApp(body) {
+      return twilioClient.messages.create({
+        from: process.env.TWILIO_WHATSAPP_FROM,
+        to: process.env.TWILIO_WHATSAPP_TO,
+        body,
+      });
+    }
+
+    async function getState() {
+      const r = await fetch(
+        `https://api.jsonbin.io/v3/b/${process.env.JSONBIN_BIN_ID}/latest`,
+        { headers: { "X-Master-Key": process.env.JSONBIN_API_KEY } }
+      );
+      if (!r.ok) throw new Error(`JSONBin GET mislukt: ${r.status}`);
+      const data = await r.json();
+      return data.record || {};
+    }
+
+    async function saveState(state) {
+      const r = await fetch(
+        `https://api.jsonbin.io/v3/b/${process.env.JSONBIN_BIN_ID}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Master-Key": process.env.JSONBIN_API_KEY,
+          },
+          body: JSON.stringify(state),
+        }
+      );
+      if (!r.ok) throw new Error(`JSONBin PUT mislukt: ${r.status}`);
+    }
+
+    // ── State ophalen ─────────────────────────────────────────────────────
+    const state = await getState();
+    const newState = { ...state };
+    const sent = [];
+    const errors = [];
+    const log = [];
+
+    // ── Feeds checken ────────────────────────────────────────────────────
+    for (const feed of RSS_FEEDS) {
+      try {
+        const parsed = await parser.parseURL(feed.url);
+
+        if (!parsed.items || parsed.items.length === 0) {
+          log.push(`${feed.name}: geen items gevonden`);
+          continue;
+        }
+
+        const latestItems = parsed.items.slice(0, 3);
+        const lastSeenId = state[feed.url];
+
+        const newItems = [];
+        for (const item of latestItems) {
+          const itemId = item.guid || item.id || item.link || item.title;
+          if (itemId === lastSeenId) break;
+          newItems.push({ item, itemId });
+        }
+
+        if (newItems.length === 0) {
+          log.push(`${feed.name}: geen nieuw item`);
+          continue;
+        }
+
+        for (const { item, itemId } of newItems.reverse()) {
+          const message = buildMessage(feed, item);
+          await sendWhatsApp(message);
+          sent.push({ feed: feed.name, title: item.title });
+          log.push(`${feed.name}: bericht gestuurd — "${item.title}"`);
+        }
+
+        newState[feed.url] = newItems[0].itemId;
+      } catch (err) {
+        const msg = `${feed.name}: FOUT — ${err.message}`;
+        errors.push(msg);
+        log.push(msg);
+      }
+    }
+
+    // ── State opslaan ────────────────────────────────────────────────────
+    try {
+      await saveState(newState);
+    } catch (err) {
+      errors.push(`State opslaan mislukt: ${err.message}`);
+    }
+
+    return res.status(200).json({
+      checked: RSS_FEEDS.length,
+      sentCount: sent.length,
+      sent,
+      errors,
+      log,
+    });
   } catch (err) {
-    errors.push(`State opslaan mislukt: ${err.message}`);
+    // Vangt ALLES op: import errors, syntax issues, onverwachte exceptions
+    console.error("Onverwachte fout in check-rss:", err);
+    return res.status(500).json({
+      error: "Onverwachte fout",
+      message: err.message,
+      stack: err.stack,
+    });
   }
-
-  return res.status(200).json({
-    checked: RSS_FEEDS.length,
-    sentCount: sent.length,
-    sent,
-    errors,
-    log,
-  });
 }
